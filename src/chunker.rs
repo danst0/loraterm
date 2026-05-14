@@ -9,6 +9,10 @@
 
 use std::time::{Duration, Instant};
 
+/// Hard cap on lines emitted per single chunker flush. Anything beyond is
+/// dropped and signalled with a trailing `[...]` marker.
+const MAX_LINES_PER_FLUSH: usize = 10;
+
 /// Configuration knobs for the chunker (subset of [`crate::config::ChunkingConfig`]).
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkerOpts {
@@ -129,11 +133,14 @@ pub fn chunks_from_text(text: &str, opts: ChunkerOpts) -> Vec<String> {
     // Collapse triple+ blank lines.
     let cleaned = collapse_blank_lines(text);
 
+    // Line cap: keep at most the first N lines and signal truncation with `[...]`.
+    let line_capped = cap_lines(&cleaned, MAX_LINES_PER_FLUSH);
+
     // Reserve room for `[i/N] ` prefix worst-case (≤ 10 chars).
     let prefix_budget = if opts.number_chunks { 10 } else { 0 };
     let inner_max = opts.max_chars.saturating_sub(prefix_budget).max(20);
 
-    let mut raw_chunks = split_into_char_chunks(&cleaned, inner_max);
+    let mut raw_chunks = split_into_char_chunks(&line_capped, inner_max);
 
     // Drop empty / pure-whitespace chunks
     raw_chunks.retain(|c| !c.trim().is_empty());
@@ -170,6 +177,34 @@ pub fn chunks_from_text(text: &str, opts: ChunkerOpts) -> Vec<String> {
         });
     }
 
+    out
+}
+
+/// Keep only the first `max_lines` newline-terminated lines. If more were present,
+/// append a literal "[...]" marker line. A non-newline-terminated trailing line
+/// counts as a line for the purpose of this cap.
+fn cap_lines(text: &str, max_lines: usize) -> String {
+    let total = text.bytes().filter(|&b| b == b'\n').count()
+        + if !text.is_empty() && !text.ends_with('\n') { 1 } else { 0 };
+    if total <= max_lines {
+        return text.to_owned();
+    }
+
+    let mut seen = 0usize;
+    let mut cut_at = text.len();
+    for (i, b) in text.bytes().enumerate() {
+        if b == b'\n' {
+            seen += 1;
+            if seen == max_lines {
+                cut_at = i + 1;
+                break;
+            }
+        }
+    }
+
+    let mut out = String::with_capacity(cut_at + 6);
+    out.push_str(&text[..cut_at]);
+    out.push_str("[...]\n");
     out
 }
 
@@ -332,6 +367,34 @@ mod tests {
         assert!(too_early.is_empty());
         let way_later = c.maybe_flush(Instant::now() + Duration::from_secs(2));
         assert!(!way_later.is_empty());
+    }
+
+    #[test]
+    fn line_cap_truncates_long_output_with_marker() {
+        // 15 single-character lines; cap is 10.
+        let body: String = (1..=15).map(|n| format!("{n}\n")).collect();
+        let chunks = chunks_from_text(&body, opts(200, false));
+        let joined = chunks.join("\n");
+        // First 10 numbers present.
+        for n in 1..=10 {
+            assert!(joined.contains(&format!("{n}")), "missing line {n}: {joined}");
+        }
+        // Anything beyond was dropped.
+        for n in 11..=15 {
+            assert!(
+                !joined.lines().any(|l| l.trim() == n.to_string()),
+                "line {n} should be dropped: {joined}"
+            );
+        }
+        assert!(joined.contains("[...]"), "missing truncation marker: {joined}");
+    }
+
+    #[test]
+    fn line_cap_passthrough_when_below_limit() {
+        let body = "one\ntwo\nthree\n";
+        let chunks = chunks_from_text(body, opts(200, false));
+        let joined = chunks.join("\n");
+        assert!(!joined.contains("[...]"), "no marker expected: {joined}");
     }
 
     #[test]
