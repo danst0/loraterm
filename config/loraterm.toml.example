@@ -5,20 +5,24 @@
 base_url = "https://meshcore.dumke.me"
 
 [identity]
-# Name of the dedicated companion identity. Created on first run if absent.
+# Cosmetic name used in logs + sanity-check against the token-resolved identity.
+# The identity itself must be created out-of-band via the Web-UI; this daemon
+# only consumes a bearer token tied to it.
 name = "shell@cassius"
-scope = "public"
-advert_on_bootstrap = true
+# Optional: pin the identity UUID explicitly. If omitted, the daemon takes the
+# (single) identity that the token resolves to.
+# id = "00000000-0000-0000-0000-000000000000"
 
 [paths]
 # Whitelist file (hot-reloaded on SIGHUP).
 whitelist = "/etc/loraterm/whitelist.toml"
-# State directory for cookie jar + cached identity id.
+# State directory.
 state_dir = "/var/lib/loraterm/state"
 # Per-peer bash $HOME directories live under this root.
 peer_home_root = "/var/lib/loraterm/peers"
-# Optional fallback credentials file (mode 0600). Preferred: systemd LoadCredential.
-# credentials_file = "/etc/loraterm/credentials.toml"
+# Optional fallback token file (mode 0600). Preferred: systemd LoadCredential
+# loraterm-token=/etc/loraterm/token, or the $LORATERM_TOKEN env var.
+# token_file = "/etc/loraterm/token"
 
 [limits]
 # Per-peer outbound rate: 1 DM every 4s with a burst of 2.

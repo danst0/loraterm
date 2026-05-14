@@ -23,9 +23,9 @@ struct Cli {
     #[arg(long, env = "LORATERM_WHITELIST")]
     whitelist: Option<PathBuf>,
 
-    /// Optional override for the credentials file (otherwise systemd LoadCredential or main config).
-    #[arg(long, env = "LORATERM_CREDENTIALS_FILE")]
-    credentials_file: Option<PathBuf>,
+    /// Optional override for the token file (otherwise systemd LoadCredential or main config).
+    #[arg(long, env = "LORATERM_TOKEN_FILE")]
+    token_file: Option<PathBuf>,
 
     /// Dump every raw SSE frame to this file (discovery mode). Disables typed dispatch downsides
     /// — typed parsing still runs, but unknown frames are preserved verbatim in the log.
@@ -55,7 +55,7 @@ fn main() -> Result<()> {
         daemon::run(daemon::DaemonArgs {
             config_path: cli.config,
             whitelist_override: cli.whitelist,
-            credentials_override: cli.credentials_file,
+            token_override: cli.token_file,
             sse_raw_log: cli.sse_raw_log,
         })
         .await

@@ -115,15 +115,6 @@ impl SseStream {
             if *shutdown_rx.borrow() {
                 break;
             }
-            if let Err(e) = self.client.ensure_session().await {
-                warn!(error = %e, "ensure_session failed before SSE connect");
-                if !sleep_with_shutdown(backoff, &mut shutdown_rx).await {
-                    break;
-                }
-                backoff = (backoff * 2).min(backoff_cap);
-                continue;
-            }
-
             info!(url = %url, "connecting SSE");
             let resp = match self.client.http().get(&url).send().await {
                 Ok(r) => r,

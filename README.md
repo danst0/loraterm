@@ -6,8 +6,9 @@ Whitelisted peer pubkeys are the only thing allowed to drive a shell session.
 
 ## Architecture
 
-- One **dedicated companion identity** (default `shell@cassius`, scope `public`)
-  is created on first run via the bridge REST API.
+- A **dedicated companion identity** (e.g. `shell@cassius`) is created
+  out-of-band via the bridge Web-UI; loraterm consumes a per-identity
+  **bearer token** (`read,write` scope).
 - The daemon opens an **SSE stream** to the bridge and watches for inbound
   DM events.
 - Each whitelisted peer pubkey gets its own **bash PTY** with a private
@@ -23,60 +24,72 @@ Whitelisted peer pubkeys are the only thing allowed to drive a shell session.
 The whitelist is the **only** trust boundary. Any whitelisted peer can run
 arbitrary commands as the daemon user. Run the daemon under an
 unprivileged dedicated UID (`loraterm`), keep `/etc/loraterm` mode-0750
-group-readable by `loraterm`, and put credentials in
-`/etc/loraterm/credentials` (mode 0600) — handed in via systemd
-`LoadCredential=`.
+group-readable by `loraterm`, and put the bearer token in
+`/etc/loraterm/token` (mode 0600) — handed in via systemd `LoadCredential=`.
 
-## Deployment (cassius)
+The token is locked to a single companion identity and a single scope set
+(`read,write` is sufficient for normal operation; `admin` would only be
+needed if you wanted the daemon to issue adverts itself).
 
-1. Build for the target:
+## Deployment
+
+1. Build:
 
    ```sh
    cargo build --release
-   install -Dm0755 target/release/loraterm /usr/local/bin/loraterm
+   sudo install -Dm0755 target/release/loraterm /usr/local/bin/loraterm
    ```
 
 2. Create user + dirs:
 
    ```sh
-   useradd --system --home-dir /var/lib/loraterm --shell /usr/sbin/nologin loraterm
-   install -d -o root -g loraterm -m 0750 /etc/loraterm
-   install -d -o loraterm -g loraterm -m 0750 /var/lib/loraterm
-   install -d -o loraterm -g loraterm -m 0700 /var/lib/loraterm/state
-   install -d -o loraterm -g loraterm -m 0750 /var/lib/loraterm/peers
+   sudo useradd --system --home-dir /var/lib/loraterm --shell /usr/sbin/nologin loraterm
+   sudo install -d -o root -g loraterm -m 0750 /etc/loraterm
+   sudo install -d -o loraterm -g loraterm -m 0750 /var/lib/loraterm
+   sudo install -d -o loraterm -g loraterm -m 0700 /var/lib/loraterm/state
+   sudo install -d -o loraterm -g loraterm -m 0750 /var/lib/loraterm/peers
    ```
 
-3. Configure:
+3. Companion identity + token (one-time, via the bridge Web-UI **or** curl):
 
    ```sh
-   install -m0640 -o root -g loraterm \
+   # Cookie-login (Web-UI flow); then create the identity + token.
+   curl -c /tmp/c -d 'email=you@example.com&password=…' https://meshcore.dumke.me/login
+   curl -b /tmp/c -d 'name=shell@cassius&scope=public' \
+        https://meshcore.dumke.me/api/v1/companion/identities
+   # → {"id": "<IDENT_UUID>", ...}
+   curl -b /tmp/c -d 'name=loraterm&scopes=read,write' \
+        https://meshcore.dumke.me/api/v1/companion/identities/<IDENT_UUID>/tokens
+   # → {"token": "ABCDEFGH…32CHARS"}  (shown once — copy now)
+   shred -u /tmp/c
+   ```
+
+4. Configure:
+
+   ```sh
+   sudo install -m0640 -o root -g loraterm \
      config/loraterm.toml.example /etc/loraterm/loraterm.toml
-   install -m0640 -o root -g loraterm \
+   sudo install -m0640 -o root -g loraterm \
      config/whitelist.toml.example /etc/loraterm/whitelist.toml
-   $EDITOR /etc/loraterm/whitelist.toml          # add real peer pubkeys
+   sudo $EDITOR /etc/loraterm/whitelist.toml          # add real peer pubkeys
 
-   # Credentials: two lines, email then password.
-   umask 077 && cat > /etc/loraterm/credentials <<EOF
-   you@example.com
-   yourbridgepassword
-   EOF
-   chmod 0600 /etc/loraterm/credentials
-   chown root:root /etc/loraterm/credentials     # systemd reads as root, copies into runtime
+   # Token (raw, single line):
+   echo -n 'ABCDEFGH…32CHARS' | sudo install -m0600 -o root -g root /dev/stdin /etc/loraterm/token
    ```
 
-4. Install + start the service:
+5. Install + start the service:
 
    ```sh
-   install -m0644 systemd/loraterm.service /etc/systemd/system/
-   systemctl daemon-reload
-   systemctl enable --now loraterm.service
+   sudo install -m0644 systemd/loraterm.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now loraterm.service
    journalctl -u loraterm.service -f
    ```
 
-5. Reload whitelist after edits:
+6. Reload whitelist after edits:
 
    ```sh
-   systemctl kill -s HUP loraterm.service
+   sudo systemctl kill -s HUP loraterm.service
    ```
 
 ## SSE schema discovery
@@ -122,7 +135,6 @@ output (`find /`) is **truncated** at 50 chunks with a
 
 ```sh
 cargo test               # offline unit + wiremock integration tests
-cargo clippy --all-targets -- -D warnings
 ```
 
 ## License

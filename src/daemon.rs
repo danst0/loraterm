@@ -1,4 +1,4 @@
-//! Top-level orchestrator. Builds the API client, bootstraps the dedicated identity,
+//! Top-level orchestrator. Builds the API client, resolves the bound companion identity,
 //! starts the SSE consumer and signal task, owns the peer registry + ArcSwap<Whitelist>,
 //! and dispatches inbound events to PeerActors.
 
@@ -19,15 +19,15 @@ use tokio::sync::{mpsc, watch, RwLock};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::api::{CompanionClient, Credentials, SseEvent, SseStream};
-use crate::config::{diff_whitelist, load_credentials_file, Config, ConfigError, Whitelist};
+use crate::api::{CompanionClient, SseEvent, SseStream, Token};
+use crate::config::{diff_whitelist, load_token_file, Config, ConfigError, Whitelist};
 use crate::peer::{spawn_peer, PeerHandle, PeerSpawn};
 use crate::signals::{spawn_signal_task, Signal};
 
 pub struct DaemonArgs {
     pub config_path: PathBuf,
     pub whitelist_override: Option<PathBuf>,
-    pub credentials_override: Option<PathBuf>,
+    pub token_override: Option<PathBuf>,
     pub sse_raw_log: Option<PathBuf>,
 }
 
@@ -45,25 +45,16 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 
     let whitelist = Arc::new(ArcSwap::from_pointee(whitelist));
 
-    let credentials = load_credentials(&config, args.credentials_override.as_deref())?;
+    let token_raw = load_token(&config, args.token_override.as_deref())?;
+    let token = Token::new(token_raw).context("validating token")?;
 
-    let cookie_path = config.paths.state_dir.join("cookies.json");
-    let state_path = config.paths.state_dir.join("state.json");
     tokio::fs::create_dir_all(&config.paths.state_dir).await.ok();
 
-    let client = Arc::new(CompanionClient::new(
-        config.bridge.base_url.clone(),
-        cookie_path,
-        credentials,
-    )?);
+    let client = Arc::new(CompanionClient::new(config.bridge.base_url.clone(), token)?);
 
-    // Authenticate + bootstrap identity.
-    client
-        .ensure_session()
-        .await
-        .context("initial bridge session")?;
-    let identity_id = bootstrap_identity(&client, &config, &state_path).await?;
-    info!(%identity_id, "identity bootstrapped");
+    // Resolve identity: either configured UUID or auto-resolve via list_identities().
+    let identity_id = resolve_identity(&client, &config).await?;
+    info!(%identity_id, name = %config.identity.name, "identity resolved");
 
     // Global rate limiter.
     let global_period = config.limits.global_period.max(Duration::from_millis(100));
@@ -89,22 +80,6 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     // Signal channel
     let (sig_tx, mut sig_rx) = mpsc::channel::<Signal>(4);
     spawn_signal_task(sig_tx);
-
-    // Cookie-persistence ticker
-    let cookie_client = client.clone();
-    let cookie_shutdown = shutdown_rx.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        interval.tick().await;
-        loop {
-            tokio::select! {
-                _ = interval.tick() => cookie_client.persist_cookies().await,
-                changed = wait_shutdown(&cookie_shutdown) => {
-                    if changed { return; }
-                }
-            }
-        }
-    });
 
     info!("loraterm running; waiting for events");
 
@@ -157,15 +132,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     }
 
     let _ = tokio::time::timeout(Duration::from_secs(10), sse_task).await;
-    client.persist_cookies().await;
     Ok(())
-}
-
-async fn wait_shutdown(rx: &watch::Receiver<bool>) -> bool {
-    let mut rx = rx.clone();
-    let _ = rx.changed().await;
-    let v = *rx.borrow();
-    v
 }
 
 async fn handle_sse_event(
@@ -243,40 +210,39 @@ async fn handle_sse_event(
     }
 }
 
-async fn bootstrap_identity(
-    client: &Arc<CompanionClient>,
-    config: &Config,
-    state_path: &std::path::Path,
-) -> Result<Uuid> {
+async fn resolve_identity(client: &Arc<CompanionClient>, config: &Config) -> Result<Uuid> {
     let identities = client
         .list_identities()
         .await
-        .context("listing identities")?;
-    let existing = identities.iter().find(|i| i.name == config.identity.name);
-    let id = if let Some(i) = existing {
-        info!(id = %i.id, name = %i.name, "using existing identity");
-        i.id
-    } else {
-        let created = client
-            .create_identity(&config.identity.name, &config.identity.scope)
-            .await
-            .context("creating identity")?;
-        info!(id = %created.id, name = %created.name, "created identity");
-        if config.identity.advert_on_bootstrap {
-            if let Err(e) = client.advert(created.id).await {
-                warn!(error = %e, "initial advert failed (non-fatal)");
-            }
+        .context("listing identities (token valid?)")?;
+    if let Some(explicit) = config.identity.id {
+        if identities.iter().any(|i| i.id == explicit) {
+            return Ok(explicit);
         }
-        created.id
-    };
-
-    let _ = tokio::fs::write(
-        state_path,
-        serde_json::to_vec_pretty(&serde_json::json!({"identity_id": id})).unwrap_or_default(),
-    )
-    .await;
-
-    Ok(id)
+        bail!(
+            "configured identity.id {} not visible to this token; saw: {:?}",
+            explicit,
+            identities.iter().map(|i| (i.id, &i.name)).collect::<Vec<_>>()
+        );
+    }
+    match identities.len() {
+        0 => bail!("token-locked identity could not be resolved (empty list)"),
+        1 => {
+            let i = &identities[0];
+            if i.name != config.identity.name {
+                warn!(
+                    expected = %config.identity.name,
+                    actual = %i.name,
+                    "identity.name in config doesn't match token-resolved identity (proceeding with token's identity)"
+                );
+            }
+            Ok(i.id)
+        }
+        _ => bail!(
+            "expected exactly one identity for token, got {}; set identity.id explicitly",
+            identities.len()
+        ),
+    }
 }
 
 async fn reload_whitelist(
@@ -304,49 +270,33 @@ async fn reload_whitelist(
     Ok(())
 }
 
-fn load_credentials(
-    config: &Config,
-    override_path: Option<&std::path::Path>,
-) -> Result<Credentials> {
+fn load_token(config: &Config, override_path: Option<&std::path::Path>) -> Result<String> {
     // 1. systemd LoadCredential
     if let Ok(dir) = env::var("CREDENTIALS_DIRECTORY") {
-        let path = std::path::Path::new(&dir).join("loraterm-creds");
+        let path = std::path::Path::new(&dir).join("loraterm-token");
         if path.exists() {
-            let raw = std::fs::read_to_string(&path)?;
-            return parse_inline_credentials(&raw)
-                .with_context(|| format!("parsing {}", path.display()));
+            let raw = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            return Ok(raw.trim().to_owned());
         }
     }
     // 2. CLI override
     if let Some(p) = override_path {
-        let cred = load_credentials_file(p)?;
-        return Ok(Credentials {
-            email: cred.email,
-            password: cred.password,
-        });
+        return Ok(load_token_file(p)?);
     }
-    // 3. config-file fallback
-    if let Some(p) = &config.paths.credentials_file {
-        let cred = load_credentials_file(p)?;
-        return Ok(Credentials {
-            email: cred.email,
-            password: cred.password,
-        });
+    // 3. Env var
+    if let Ok(v) = env::var("LORATERM_TOKEN") {
+        let v = v.trim().to_string();
+        if !v.is_empty() {
+            return Ok(v);
+        }
     }
-    bail!("no credentials configured (set CREDENTIALS_DIRECTORY or paths.credentials_file)");
-}
-
-fn parse_inline_credentials(raw: &str) -> Result<Credentials> {
-    let mut lines = raw.lines().filter(|l| !l.trim().is_empty());
-    let email = lines
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("empty credentials file"))?
-        .trim()
-        .to_string();
-    let password = lines
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("missing password line"))?
-        .trim()
-        .to_string();
-    Ok(Credentials { email, password })
+    // 4. config-file fallback
+    if let Some(p) = &config.paths.token_file {
+        return Ok(load_token_file(p)?);
+    }
+    bail!(
+        "no token configured (try one of: systemd LoadCredential=loraterm-token, \
+         --token-file, $LORATERM_TOKEN, paths.token_file)"
+    );
 }

@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use thiserror::Error;
+use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -58,19 +59,16 @@ pub struct BridgeConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct IdentityConfig {
-    /// Name of the dedicated companion identity to use / create on startup.
+    /// Cosmetic name of the bound companion identity (used for logging + sanity-check
+    /// against the identity the token resolves to). The identity itself must be
+    /// created out-of-band (Web-UI) — this daemon only consumes a bearer token.
     pub name: String,
-    /// "public" or "pool:<uuid>". Only used at bootstrap.
-    #[serde(default = "default_identity_scope")]
-    pub scope: String,
-    /// Whether to send an initial advert on bootstrap.
-    #[serde(default = "default_true")]
-    pub advert_on_bootstrap: bool,
+    /// Optional explicit identity UUID. If omitted, resolved via `GET /identities`
+    /// (which under bearer auth returns exactly the token's locked identity).
+    #[serde(default)]
+    pub id: Option<Uuid>,
 }
 
-fn default_identity_scope() -> String {
-    "public".to_string()
-}
 fn default_true() -> bool {
     true
 }
@@ -82,7 +80,7 @@ pub struct PathsConfig {
     pub peer_home_root: PathBuf,
     /// Optional fallback when systemd LoadCredential is not used.
     #[serde(default)]
-    pub credentials_file: Option<PathBuf>,
+    pub token_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -330,16 +328,13 @@ fn validate_pubkey(raw: &str) -> Result<String, String> {
     Ok(trimmed.to_ascii_lowercase())
 }
 
-// ---------- Credentials ----------
+// ---------- Token ----------
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct CredentialsFile {
-    pub email: String,
-    pub password: String,
-}
-
-/// Read credentials from a file, refusing any mode != 0600. Returns `(email, password)`.
-pub fn load_credentials_file(path: &Path) -> Result<CredentialsFile, ConfigError> {
+/// Read a bearer token from a file. The file must be mode 0600 (no group/other
+/// access) and contain the token as a single line (optional trailing newline).
+/// This format is identical to what `systemd LoadCredential=` exposes via
+/// `$CREDENTIALS_DIRECTORY`.
+pub fn load_token_file(path: &Path) -> Result<String, ConfigError> {
     let meta = fs::metadata(path).map_err(|source| ConfigError::Read {
         path: path.to_path_buf(),
         source,
@@ -355,10 +350,7 @@ pub fn load_credentials_file(path: &Path) -> Result<CredentialsFile, ConfigError
         path: path.to_path_buf(),
         source,
     })?;
-    toml::from_str(&raw).map_err(|source| ConfigError::Parse {
-        path: path.to_path_buf(),
-        source,
-    })
+    Ok(raw.trim().to_owned())
 }
 
 #[cfg(test)]
@@ -501,27 +493,20 @@ pubkey = "{bad}"
     }
 
     #[test]
-    fn credentials_file_rejects_world_readable() {
-        let f = write_toml(r#"
-email = "x@y.z"
-password = "hunter2hunter2"
-"#);
-        // default tempfile mode is usually 0600 but be explicit
+    fn token_file_rejects_world_readable() {
+        let f = write_toml("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567\n");
         std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(matches!(
-            load_credentials_file(f.path()).unwrap_err(),
+            load_token_file(f.path()).unwrap_err(),
             ConfigError::InsecurePermissions { .. }
         ));
     }
 
     #[test]
-    fn credentials_file_accepts_0600() {
-        let f = write_toml(r#"
-email = "x@y.z"
-password = "hunter2hunter2"
-"#);
+    fn token_file_trims_whitespace() {
+        let f = write_toml("  ABCDEFGHIJKLMNOPQRSTUVWXYZ234567  \n");
         std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
-        let c = load_credentials_file(f.path()).unwrap();
-        assert_eq!(c.email, "x@y.z");
+        let t = load_token_file(f.path()).unwrap();
+        assert_eq!(t, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567");
     }
 }
