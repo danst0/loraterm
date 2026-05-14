@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+
+# Local-only credentials and runtime state
+credentials.toml
+credentials
+*.cookies.json
+state.json
+*.raw.log

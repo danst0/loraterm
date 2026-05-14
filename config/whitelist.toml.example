@@ -1,0 +1,18 @@
+# loraterm — peer whitelist.
+# Hot-reload via: kill -HUP $(systemctl show -p MainPID --value loraterm.service)
+# Each peer's Ed25519 pubkey must be lower-hex 64 chars (find it via the companion UI:
+# /companion → contact details).
+
+# Optional defaults applied to all peers unless overridden per entry.
+default_idle_timeout = "30m"
+default_dm_max_chars = 120
+
+[[peer]]
+pubkey   = "0000000000000000000000000000000000000000000000000000000000000000"
+nickname = "danst-handheld"
+
+# [[peer]]
+# pubkey       = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+# nickname     = "laptop"
+# idle_timeout = "2h"
+# dm_max_chars = 100

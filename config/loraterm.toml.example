@@ -1,0 +1,45 @@
+# loraterm — main daemon configuration.
+# Place at /etc/loraterm/loraterm.toml (mode 0640, group: loraterm).
+
+[bridge]
+base_url = "https://meshcore.dumke.me"
+
+[identity]
+# Name of the dedicated companion identity. Created on first run if absent.
+name = "shell@cassius"
+scope = "public"
+advert_on_bootstrap = true
+
+[paths]
+# Whitelist file (hot-reloaded on SIGHUP).
+whitelist = "/etc/loraterm/whitelist.toml"
+# State directory for cookie jar + cached identity id.
+state_dir = "/var/lib/loraterm/state"
+# Per-peer bash $HOME directories live under this root.
+peer_home_root = "/var/lib/loraterm/peers"
+# Optional fallback credentials file (mode 0600). Preferred: systemd LoadCredential.
+# credentials_file = "/etc/loraterm/credentials.toml"
+
+[limits]
+# Per-peer outbound rate: 1 DM every 4s with a burst of 2.
+per_peer_period = "4s"
+per_peer_burst = 2
+# Global outbound rate cap.
+global_period = "1s"
+global_burst = 5
+# Idle PTY session lifetime.
+idle_timeout = "30m"
+# Maximum number of chunks emitted from a single PTY output burst; excess is dropped with a marker.
+burst_chunk_cap = 50
+# Inbound (DM → PTY) channel depth per peer.
+inbound_channel_depth = 32
+# Outbound (chunker → sender) channel depth per peer.
+outbound_channel_depth = 64
+
+[chunking]
+# Maximum characters per DM (must leave headroom for the ~140 B TXT_MSG payload).
+dm_max_chars = 120
+# Prepend "[i/N] " to multi-chunk outputs so the operator can detect loss.
+number_chunks = true
+# After this much PTY-stdout silence, flush the current buffer even without a newline.
+flush_silence = "600ms"

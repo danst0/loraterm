@@ -1,0 +1,39 @@
+[Unit]
+Description=loraterm — LoRa mesh terminal emulator daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=loraterm
+Group=loraterm
+LoadCredential=loraterm-creds:/etc/loraterm/credentials
+ExecStart=/usr/local/bin/loraterm --config /etc/loraterm/loraterm.toml
+Restart=on-failure
+RestartSec=5s
+
+# Sandboxing
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=no
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+MemoryDenyWriteExecute=yes
+ReadWritePaths=/var/lib/loraterm
+StateDirectory=loraterm
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
