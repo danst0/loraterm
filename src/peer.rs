@@ -188,10 +188,7 @@ impl PeerActor {
                 line = input_rx.recv() => {
                     let Some(line) = line else { break "input_closed"; };
                     self.touch();
-                    let mut payload = line.into_bytes();
-                    if !payload.ends_with(b"\n") {
-                        payload.push(b'\n');
-                    }
+                    let payload = encode_pty_input(&line);
                     if pty.input_tx.send(payload).await.is_err() {
                         warn!("pty input channel closed");
                         break "pty_closed";
@@ -256,6 +253,21 @@ impl PeerActor {
     }
 }
 
+/// Translate an inbound DM line into raw bytes for the PTY.
+/// Special tokens (case-insensitive, surrounding whitespace ignored):
+///   `[ctrl-c]` → single 0x03 byte (no trailing newline) → SIGINT to fg job
+/// Everything else: literal bytes plus a newline if not already present.
+fn encode_pty_input(line: &str) -> Vec<u8> {
+    if line.trim().eq_ignore_ascii_case("[ctrl-c]") {
+        return vec![0x03];
+    }
+    let mut payload = line.as_bytes().to_vec();
+    if !payload.ends_with(b"\n") {
+        payload.push(b'\n');
+    }
+    payload
+}
+
 async fn enqueue_chunk(tx: &mpsc::Sender<String>, chunk: String) {
     match tx.try_send(chunk) {
         Ok(_) => {}
@@ -299,5 +311,36 @@ impl SenderTask {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_pty_input;
+
+    #[test]
+    fn ctrl_c_token_emits_single_etx_byte() {
+        assert_eq!(encode_pty_input("[ctrl-c]"), vec![0x03]);
+    }
+
+    #[test]
+    fn ctrl_c_token_is_case_insensitive_and_trimmed() {
+        assert_eq!(encode_pty_input("  [Ctrl-C]\n"), vec![0x03]);
+        assert_eq!(encode_pty_input("[CTRL-C]"), vec![0x03]);
+    }
+
+    #[test]
+    fn regular_line_gets_newline_appended() {
+        assert_eq!(encode_pty_input("ls"), b"ls\n".to_vec());
+    }
+
+    #[test]
+    fn regular_line_with_trailing_newline_is_unchanged() {
+        assert_eq!(encode_pty_input("ls\n"), b"ls\n".to_vec());
+    }
+
+    #[test]
+    fn ctrl_c_substring_in_real_command_is_not_treated_as_token() {
+        assert_eq!(encode_pty_input("echo '[ctrl-c]'"), b"echo '[ctrl-c]'\n".to_vec());
     }
 }
