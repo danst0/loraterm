@@ -170,32 +170,38 @@ async fn handle_sse_event(
     };
     let peer_cfg = peer_cfg.clone();
 
-    // Ensure peer exists; spawn if not.
-    let already_has = {
-        let g = peers.read().await;
-        g.contains_key(&pubkey)
-    };
-    if !already_has {
-        info!(peer = %&pubkey[..8], "spawning new PTY session");
-        let peer_home = config
-            .paths
-            .peer_home_root
-            .join(&pubkey[..16]);
-        match spawn_peer(PeerSpawn {
-            peer: peer_cfg,
-            identity_id,
-            client: client.clone(),
-            peer_home,
-            limits: config.limits.clone(),
-            chunking: config.chunking.clone(),
-            global_limiter: global_limiter.clone(),
-        }) {
-            Ok(handle) => {
-                peers.write().await.insert(pubkey.clone(), handle);
-            }
-            Err(e) => {
-                warn!(error = %e, "spawn_peer failed");
-                return;
+    // Ensure peer exists and is alive; spawn (or respawn) if not.
+    // A `PeerHandle` stays in the registry after its actor exits (idle timeout,
+    // PTY EOF, …), so the existence check must also verify the input channel
+    // is still open — otherwise the next DM gets silently dropped.
+    {
+        let mut guard = peers.write().await;
+        let stale = guard
+            .get(&pubkey)
+            .map_or(false, |h| h.input_tx.is_closed());
+        if stale {
+            info!(peer = %&pubkey[..8], "previous session ended; respawning");
+            guard.remove(&pubkey);
+        }
+        if !guard.contains_key(&pubkey) {
+            info!(peer = %&pubkey[..8], "spawning new PTY session");
+            let peer_home = config.paths.peer_home_root.join(&pubkey[..16]);
+            match spawn_peer(PeerSpawn {
+                peer: peer_cfg,
+                identity_id,
+                client: client.clone(),
+                peer_home,
+                limits: config.limits.clone(),
+                chunking: config.chunking.clone(),
+                global_limiter: global_limiter.clone(),
+            }) {
+                Ok(handle) => {
+                    guard.insert(pubkey.clone(), handle);
+                }
+                Err(e) => {
+                    warn!(error = %e, "spawn_peer failed");
+                    return;
+                }
             }
         }
     }

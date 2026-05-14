@@ -135,7 +135,7 @@ fn default_global_burst() -> u32 {
     5
 }
 fn default_idle_timeout() -> Duration {
-    Duration::from_secs(1800)
+    Duration::from_secs(6 * 3600)
 }
 fn default_burst_chunk_cap() -> usize {
     50

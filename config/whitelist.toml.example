@@ -4,7 +4,7 @@
 # /companion → contact details).
 
 # Optional defaults applied to all peers unless overridden per entry.
-default_idle_timeout = "30m"
+default_idle_timeout = "6h"
 default_dm_max_chars = 120
 
 [[peer]]

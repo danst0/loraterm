@@ -32,7 +32,7 @@ per_peer_burst = 2
 global_period = "1s"
 global_burst = 5
 # Idle PTY session lifetime.
-idle_timeout = "30m"
+idle_timeout = "6h"
 # Maximum number of chunks emitted from a single PTY output burst; excess is dropped with a marker.
 burst_chunk_cap = 50
 # Inbound (DM → PTY) channel depth per peer.
