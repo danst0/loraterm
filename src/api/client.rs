@@ -102,10 +102,15 @@ impl CompanionClient {
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, auth_value);
 
+        // No global `timeout()` — that would also cap long-lived SSE responses,
+        // forcing pointless reconnects every N seconds. Connect timeout is enough
+        // to bound stuck handshakes; per-request `.timeout()` can still be applied
+        // ad-hoc by short calls if ever needed.
         let http = Client::builder()
             .default_headers(headers)
             .user_agent(concat!("loraterm/", env!("CARGO_PKG_VERSION")))
-            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(30))
+            .pool_idle_timeout(Some(Duration::from_secs(90)))
             .build()?;
         Ok(Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),

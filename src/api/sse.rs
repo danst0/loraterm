@@ -223,33 +223,49 @@ fn parse_event(event_name: &str, data: &str) -> SseEvent {
         }
     };
 
-    let lowered = event_name.to_ascii_lowercase();
-    if lowered.contains("dm") && lowered.contains("recv")
-        || lowered == "message"
-        || lowered == "dm_received"
-    {
-        if let Ok(dm) = serde_json::from_value::<DmEvent>(value.clone()) {
-            return SseEvent::DmReceived(dm);
-        }
-    }
-    if lowered.contains("echo") || lowered.contains("sent") {
+    // Observed schema (Bridge v0.5.5): SSE `event:` is always `message`. The
+    // discriminator is the JSON `type` field combined with `direction`.
+    //   - inbound DM:  type="dm"      direction="in"
+    //   - sent echo:   type="sent_dm" direction="out"
+    //   - channel msg: type="dm"/...  direction="in" with channel_id set
+    //   - contact / status: other `type` values, no peer_pubkey_hex+text combo
+    let type_field = value
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let direction = value
+        .get("direction")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    // Treat anything explicitly outbound as a sent echo — never forward to PTY.
+    if direction == "out" || type_field.starts_with("sent_") {
         if let Ok(dm) = serde_json::from_value::<DmEvent>(value.clone()) {
             return SseEvent::SentEcho(dm);
         }
+        return SseEvent::Other {
+            kind: type_field,
+            raw: value,
+        };
     }
 
-    // Structural fallback: try DmEvent shape on any unknown.
-    if let Ok(dm) = serde_json::from_value::<DmEvent>(value.clone()) {
-        if dm.direction.as_deref() == Some("in") {
-            return SseEvent::DmReceived(dm);
-        }
-        if dm.direction.as_deref() == Some("out") {
-            return SseEvent::SentEcho(dm);
+    // Inbound DM: must be type=dm AND direction=in AND carry both pubkey + text.
+    if (type_field == "dm" || type_field.is_empty()) && direction == "in" {
+        if let Ok(dm) = serde_json::from_value::<DmEvent>(value.clone()) {
+            if dm.text.is_some() && !dm.peer_pubkey_hex.is_empty() {
+                return SseEvent::DmReceived(dm);
+            }
         }
     }
 
     SseEvent::Other {
-        kind: event_name.to_owned(),
+        kind: if type_field.is_empty() {
+            event_name.to_owned()
+        } else {
+            type_field
+        },
         raw: value,
     }
 }
@@ -259,9 +275,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_inbound_dm_by_structure() {
-        let data = r#"{"id":"1","peer_pubkey_hex":"ab","text":"hi","direction":"in"}"#;
-        match parse_event("", data) {
+    fn parses_inbound_dm_by_type_and_direction() {
+        let data = r#"{"type":"dm","id":"1","peer_pubkey_hex":"ab","text":"hi","direction":"in"}"#;
+        match parse_event("message", data) {
             SseEvent::DmReceived(dm) => {
                 assert_eq!(dm.peer_pubkey_hex, "ab");
                 assert_eq!(dm.text.as_deref(), Some("hi"));
@@ -271,27 +287,37 @@ mod tests {
     }
 
     #[test]
-    fn parses_echo_when_direction_out() {
-        let data = r#"{"id":"1","peer_pubkey_hex":"ab","text":"hi","direction":"out"}"#;
-        match parse_event("", data) {
+    fn sent_dm_is_classified_as_echo_not_dm() {
+        // This is the exact shape that triggered the self-echo loop in the live test.
+        let data = r#"{"type":"sent_dm","id":"1","peer_pubkey_hex":"ab","text":"$ pwd","direction":"out"}"#;
+        match parse_event("message", data) {
             SseEvent::SentEcho(_) => {}
             other => panic!("expected SentEcho, got {other:?}"),
         }
     }
 
     #[test]
-    fn parses_dm_by_event_name() {
-        let data = r#"{"peer_pubkey_hex":"cd","text":"yo"}"#;
-        match parse_event("dm_received", data) {
-            SseEvent::DmReceived(dm) => assert_eq!(dm.peer_pubkey_hex, "cd"),
-            other => panic!("expected DmReceived, got {other:?}"),
+    fn outbound_direction_alone_blocks_inbound_classification() {
+        let data = r#"{"peer_pubkey_hex":"ab","text":"hi","direction":"out"}"#;
+        match parse_event("message", data) {
+            SseEvent::SentEcho(_) => {}
+            other => panic!("expected SentEcho, got {other:?}"),
         }
     }
 
     #[test]
-    fn falls_back_to_other_for_unknown() {
-        let data = r#"{"foo":"bar"}"#;
-        match parse_event("contact_update", data) {
+    fn dm_without_text_is_not_inbound() {
+        let data = r#"{"type":"dm","peer_pubkey_hex":"ab","direction":"in"}"#;
+        match parse_event("message", data) {
+            SseEvent::Other { .. } => {}
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn falls_back_to_other_for_unknown_type() {
+        let data = r#"{"type":"contact_update","foo":"bar"}"#;
+        match parse_event("message", data) {
             SseEvent::Other { kind, .. } => assert_eq!(kind, "contact_update"),
             other => panic!("expected Other, got {other:?}"),
         }
