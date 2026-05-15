@@ -78,7 +78,14 @@ impl Chunker {
     }
 
     /// Time when the chunker would next want to be woken (i.e. silence-deadline).
+    /// Returns `None` when the buffer is empty — otherwise the peer actor would
+    /// spin: a push ending on `\n` drains the buffer via `flush_committed` but
+    /// leaves `last_push` set, so a stale past deadline would fire the silence
+    /// arm of the select loop again and again with nothing to flush.
     pub fn next_deadline(&self) -> Option<Instant> {
+        if self.buf.is_empty() {
+            return None;
+        }
         self.last_push.map(|t| t + self.opts.flush_silence)
     }
 
@@ -357,6 +364,22 @@ mod tests {
         assert!(empty.is_empty(), "no newline → no flush");
         let flushed = c.push(b" continued\n");
         assert!(!flushed.is_empty());
+    }
+
+    #[test]
+    fn no_deadline_after_push_drains_buffer_completely() {
+        // Regression: a push whose bytes end exactly on `\n` flushes everything
+        // via flush_committed and leaves buf empty. next_deadline() must then
+        // return None — otherwise the peer actor select loop spins on a stale
+        // past deadline (~30k iters/sec until the next PTY byte arrives).
+        let mut c = Chunker::new(opts(120, false));
+        let out = c.push(b"file1\nfile2\n");
+        assert!(!out.is_empty(), "should have flushed something");
+        assert_eq!(
+            c.next_deadline(),
+            None,
+            "buf is empty after full drain → no silence-flush deadline expected",
+        );
     }
 
     #[test]
